@@ -1,0 +1,67 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>NebulaJS SPA Example</title>
+  <style>body{font-family:system-ui; margin:0; padding:2rem} .stack>*+*{margin-top:1rem}</style>
+  <script src="../../dist/nebula.min.js"></script>
+</head>
+<body>
+  <nav class="stack">
+    <strong>NebulaJS</strong>
+    <div>
+      <a href="#/">Home</a> · <a href="#/todos">Todos</a> · <a href="#/about">About</a>
+    </div>
+  </nav>
+  <hr/>
+  <div id="app" class="stack"></div>
+
+  <script>
+    const { createApp, h, Router, routes, createStore, combineReducers, createSlice, applyMiddleware } = window.Nebula;
+    const todosSlice = createSlice({
+      name: 'todos', initialState: [], reducers: {
+        add: (s,a) => s.concat({ id: Date.now(), title: a.payload, done:false }),
+        toggle: (s,a) => s.map(t => t.id===a.payload?{...t,done:!t.done}:t)
+      }
+    });
+    const store = createStore(combineReducers({ todos: todosSlice.reducer }));
+
+    function connect(selector, view){ // tiny connect
+      return () => { const s = selector(store.getState()); return view(s, store.dispatch); };
+    }
+
+    const Todos = connect(s=>s.todos, (todos, dispatch) => {
+      let input = '';
+      const add = () => { if(input.trim()) dispatch(todosSlice.actions.add(input)); input=''; render(); };
+      const render = () => h('div', { class:'stack' }, [
+        h('h2', null, 'Todos ('+todos.length+')'),
+        h('div', null, [
+          h('input', { value: input, oninput: e=>{input=e.target.value;} }),
+          h('button', { onclick: add }, 'Add')
+        ]),
+        h('ul', null, todos.map(t => h('li', null,[
+          h('label', null,[
+            h('input', { type:'checkbox', checked: t.done, onchange: ()=>dispatch(todosSlice.actions.toggle(t.id)) }),
+            ' ', t.title
+          ])
+        ])))
+      ]);
+      return render();
+    });
+
+    const Home = () => () => h('div', null, 'Welcome to NebulaJS');
+    const About = () => () => h('div', null, 'About NebulaJS');
+
+    const App = () => () => h('main', { class:'stack' }, [
+      Router(routes([
+        ['#/', Home],
+        ['#/todos', Todos],
+        ['#/about', About]
+      ]))
+    ]);
+
+    createApp(App).mount('#app');
+  </script>
+</body>
+</html>

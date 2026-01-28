@@ -1,0 +1,246 @@
+
+(function(global){
+  const modules = {};
+  function define(name, factory){ modules[name] = { factory, exports:{} }; }
+  function require(name){ const m = modules[name]; if(!m.instance){ m.instance = true; m.factory(m.exports, require); } return m.exports; }
+
+define('core/utils', function(exports, require){
+exports.isFn = (v) => typeof v === 'function';
+exports.isObj = (v) => v !== null && typeof v === 'object';
+exports.shallowEq = (a,b) => {
+  if (a === b) return true;
+  if (!isObj(a) || !isObj(b)) return false;
+  const ka = Object.keys(a), kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (let k of ka) if (a[k] !== b[k]) return false; return true;
+};
+exports.assign = Object.assign;
+exports.nextTick = (fn) => Promise.resolve().then(fn);
+exports.warn = (...args) => console.warn('[Nebula]', ...args);
+exports.assert = (cond, msg) => { if(!cond) throw new Error('[Nebula] ' + (msg||'assert failed')); };
+
+});
+define('core/emitter', function(exports, require){
+exports.Emitter {
+  constructor(){ this._m = new Map(); }
+  on(evt, cb){ const arr = this._m.get(evt) || []; arr.push(cb); this._m.set(evt, arr); return () => this.off(evt, cb); }
+  off(evt, cb){ const arr = this._m.get(evt) || []; const i = arr.indexOf(cb); if(i>-1) arr.splice(i,1); this._m.set(evt, arr); }
+  emit(evt, ...args){ const arr = this._m.get(evt) || []; arr.slice().forEach(cb => cb(...args)); }
+}
+
+});
+define('reactivity/signal', function(exports, require){
+let currentEffect = null;
+const depsMap = new WeakMap(); // target -> key -> Set(effects)
+
+exports.effect(fn){
+  const wrapped = () => { try{ currentEffect = wrapped; return fn(); } finally { currentEffect = null; } };
+  wrapped();
+  return () => {/* noop disposer for basic impl */};
+}
+
+function track(target, key){
+  if(!currentEffect) return;
+  let depForTarget = depsMap.get(target); if(!depForTarget){ depForTarget = new Map(); depsMap.set(target, depForTarget); }
+  let dep = depForTarget.get(key); if(!dep){ dep = new Set(); depForTarget.set(key, dep); }
+  dep.add(currentEffect);
+}
+function trigger(target, key){
+  const depForTarget = depsMap.get(target); if(!depForTarget) return;
+  const dep = depForTarget.get(key); if(!dep) return;
+  dep.forEach(eff => eff());
+}
+
+exports.createSignal(initial){
+  const box = { v: initial };
+  const read = () => { track(box,'v'); return box.v; };
+  const write = (nv) => { box.v = nv; trigger(box,'v'); };
+  return [read, write];
+}
+
+exports.computed(getter){
+  const [val,set] = createSignal(undefined);
+  effect(() => set(getter()));
+  return val;
+}
+
+});
+define('dom/h', function(exports, require){
+exports.h(type, props, children){
+  return { type, props: props || null, children: normalize(children) };
+}
+function normalize(c){
+  if (Array.isArray(c)) return c.flat().map(normalize).flat();
+  if (c === null || c === undefined || c === false) return [];
+  return [c];
+}
+
+});
+define('dom/render', function(exports, require){
+import { isObj, isFn } from '../../core/src/utils.js';
+
+exports.mount(vnode, container){
+  const node = createElm(vnode);
+  container.innerHTML = '';
+  container.appendChild(node);
+  return node;
+}
+
+function setProps(el, props){
+  if(!props) return;
+  for(const k in props){
+    const v = props[k];
+    if(k === 'style' && isObj(v)) Object.assign(el.style, v);
+    else if(k.startsWith('on') && isFn(v)) el.addEventListener(k.slice(2).toLowerCase(), v);
+    else if(k in el) el[k] = v; else el.setAttribute(k, v);
+  }
+}
+
+function createElm(v){
+  if (typeof v === 'string' || typeof v === 'number') return document.createTextNode(String(v));
+  if (isFn(v)) return createElm(v()); // functional child
+  const { type, props, children } = v;
+  if (isFn(type)) return createElm(type(props));
+  const el = document.createElement(type);
+  setProps(el, props);
+  (children||[]).forEach(c => el.appendChild(createElm(c)));
+  return el;
+}
+
+});
+define('component/component', function(exports, require){
+import { isFn } from '../../core/src/utils.js';
+import { h } from '../../dom/src/h.js';
+import { mount as _mount } from '../../dom/src/render.js';
+
+exports.createApp(Root){
+  let _rootEl = null;
+  return {
+    mount(sel){
+      const el = typeof sel === 'string' ? document.querySelector(sel) : sel;
+      if(!el) throw new Error('mount target not found');
+      const tree = isFn(Root) ? Root() : Root;
+      _rootEl = _mount(tree, el);
+      return this;
+    }
+  };
+}
+
+export { h };
+
+});
+define('router/router', function(exports, require){
+import { h } from '../../dom/src/h.js';
+
+exports.routes(pairs){ return pairs; }
+
+exports.Router(routePairs){
+  const match = () => {
+    const hash = location.hash || '#/' ;
+    for(const [path, comp] of routePairs){ if(path === hash) return comp; }
+    return () => h('div', null, 'Not found');
+  };
+  const View = () => {
+    let Comp = match();
+    const rerender = () => { Comp = match(); root.replaceWith(render()); };
+    window.addEventListener('hashchange', rerender);
+    const render = () => h('div', { role:'region' }, [ (typeof Comp === 'function' ? Comp() : Comp) ]);
+    const root = render();
+    return root;
+  };
+  return View;
+}
+
+exports.Link(props, label){
+  return h('a', { href: props.to }, label || props.children || 'link');
+}
+
+});
+define('store/store', function(exports, require){
+exports.createStore(reducer, preloaded, enhancer){
+  if (enhancer) return enhancer(createStore)(reducer, preloaded);
+  let state = preloaded, subs = [];
+  const getState = () => state;
+  const subscribe = (fn) => { subs.push(fn); return () => { const i=subs.indexOf(fn); if(i>-1) subs.splice(i,1); } };
+  const dispatch = (action) => { state = reducer(state, action); subs.slice().forEach(s=>s()); return action; };
+  dispatch({ type: '@@nebula/INIT' });
+  return { getState, subscribe, dispatch };
+}
+exports.combineReducers = (spec) => (state={}, action) => {
+  const next = {}; for(const k in spec){ next[k] = spec[k](state[k], action); } return next;
+};
+exports.applyMiddleware = (...mws) => (createStoreFn) => (reducer, preloaded) => {
+  const store = createStoreFn(reducer, preloaded);
+  let dispatch = store.dispatch;
+  const api = { getState: store.getState, dispatch: (a)=>dispatch(a) };
+  const chain = mws.map(mw => mw(api));
+  dispatch = chain.reduceRight((a,b)=>b(a), dispatch);
+  return { ...store, dispatch };
+};
+exports.createSlice({ name, initialState, reducers }){
+  const types = Object.fromEntries(Object.keys(reducers).map(k => [k, `${name}/${k}`]));
+  const reducer = (state = initialState, action) => {
+    for(const k in types){ if(action.type === types[k]) return reducers[k](state, action); }
+    return state;
+  };
+  const actions = Object.fromEntries(Object.keys(reducers).map(k => [k, (payload)=>({ type: types[k], payload })]));
+  return { reducer, actions, types };
+}
+
+});
+define('http/client', function(exports, require){
+exports.createClient({ baseURL = '', headers = {}, retry = 0 } = {}){
+  const reqInter = []; const resInter = [];
+  const request = async (method, url, body, opts={}) => {
+    const ctx = { method, url: baseURL + url, headers: { ...headers, ...(opts.headers||{}) }, body };
+    for(const i of reqInter) await i(ctx);
+    let attempt = 0, lastErr = null;
+    while(attempt <= retry){
+      try{
+        const res = await fetch(ctx.url, { method, headers: ctx.headers, body: body && JSON.stringify(body) });
+        const data = await res.json().catch(()=>null);
+        let out = { ok: res.ok, status: res.status, data, headers: res.headers };
+        for(const i of resInter) out = await i(out) || out;
+        if(!res.ok) throw Object.assign(new Error('HTTP '+res.status), { response: out });
+        return out;
+      }catch(e){ lastErr = e; attempt++; if(attempt>retry) throw e; }
+    }
+    throw lastErr;
+  };
+  return {
+    useRequest: (fn) => reqInter.push(fn),
+    useResponse: (fn) => resInter.push(fn),
+    get: (url, opts) => request('GET', url, null, opts),
+    post: (url, body, opts) => request('POST', url, body, opts),
+    put: (url, body, opts) => request('PUT', url, body, opts),
+    del: (url, opts) => request('DELETE', url, null, opts)
+  };
+}
+
+});
+define('devtools/logger', function(exports, require){
+exports.createLogger(prefix='Nebula'){
+  return (store) => (next) => (action) => {
+    console.groupCollapsed(`[${prefix}]`, action.type);
+    console.log('prev', store.getState());
+    const res = next(action);
+    console.log('next', store.getState());
+    console.groupEnd();
+    return res;
+  };
+}
+
+});
+
+  const api = {};
+  Object.assign(api,
+    require('component/component'),
+    require('dom/h'),
+    require('reactivity/signal'),
+    require('router/router'),
+    require('store/store'),
+    require('http/client'),
+    require('devtools/logger')
+  );
+  global.Nebula = api;
+})(typeof window!=='undefined'?window:globalThis);
